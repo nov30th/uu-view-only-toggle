@@ -5,3 +5,7 @@ __pycache__/
 .idea/
 .vscode/
 *.log
+*.spec
+build/
+dist/
+icon_cropped.png

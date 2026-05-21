@@ -1,61 +1,74 @@
-# UU View-Only Toggle
+# UU 仅观看模式 (UU View-Only Toggle)
 
-A tiny Windows utility that adds a real **view-only mode** to NetEase UU Remote (网易UU远程), preventing local mouse/keyboard input from being forwarded to the controlled machine while the screen continues to render normally.
+为网易 UU 远程添加真正的**仅观看模式**，防止本地鼠标/键盘操作转发到被控端，同时屏幕正常显示。
 
-## Why
+## 界面
 
-UU Remote does not expose an obvious view-only toggle on the Windows client. This tool bridges that gap without touching UU's process memory, without DLL injection, and without low-level system hooks — it uses one tiny Win32 API call: `EnableWindow`.
+```
+┌──────────────────────────┐
+│                          │
+│          ●  (绿色=控制中) │
+│   已找到 UU 远程窗口      │
+│   快捷键: Ctrl+Alt+V     │
+│                          │
+│   ┌──────────────────┐   │
+│   │   启用仅观看     │   │
+│   └──────────────────┘   │
+│                          │
+│      ┌──────────┐        │
+│      │ 重新扫描  │        │
+│      └──────────┘        │
+│   关闭自动恢复控制       │
+└──────────────────────────┘
+```
 
-## How it works
+## 原理
 
-1. Enumerates all visible top-level windows owned by `GameViewer.exe` (the actual UU Remote process).
-2. Lets you pick which window(s) to control.
-3. On hotkey, walks all child windows of the chosen targets and calls `EnableWindow(hwnd, FALSE)`.
-4. Windows itself drops mouse and keyboard messages before they ever reach UU's render surface.
-5. The top-level window stays enabled, so you can still drag, minimize, and close UU normally.
+通过 Win32 `EnableWindow` API 禁用 UU 远程窗口（GameViewer.exe）的所有子窗口，使 Windows 在消息层面丢弃鼠标/键盘输入。顶层窗口保持启用，可以拖拽/关闭。
 
-No admin rights required. No global hooks. No third-party Python dependencies.
+无需管理员权限，无需 DLL 注入，无需全局钩子。
 
-## Files
+## 使用方式
 
-| File | Purpose |
-|------|---------|
-| `uu_view_only.py` | The toggle script (pure `ctypes`, stdlib only) |
-| `run_uu_view_only.bat` | Double-click launcher |
-| `docs/research.md` | Background research on alternative approaches |
+### 方式一：直接运行
 
-## Requirements
+双击 `run_uu_view_only.bat`，自动安装依赖并启动 GUI。
 
-- Windows 10 / 11
-- Python 3.10+ in `PATH`
-- NetEase UU Remote installed and running (`GameViewer.exe`)
+### 方式二：打包为单文件 EXE（推荐分发）
 
-## Usage
+1. 双击 `build_exe.bat`
+2. 等待构建完成，在 `dist\` 目录找到 `UU仅观看模式.exe`
+3. 单独分发这个 exe，无需 Python 环境
 
-1. Open UU Remote and connect to a remote machine.
-2. Double-click `run_uu_view_only.bat`.
-3. The console prints all `GameViewer.exe` windows. Press Enter to target them all, or type a comma list (e.g. `1,3`).
-4. Use the hotkeys:
+### 操作
 
-| Hotkey | Action |
-|--------|--------|
-| `Ctrl+Alt+V` | Toggle view-only / control mode |
-| `Ctrl+Alt+B` | Rescan and re-pick target windows |
-| `Ctrl+C` | Exit (auto-restores enabled state) |
+| 操作 | 说明 |
+|------|------|
+| 点击「启用仅观看」 | 切换到仅观看模式，本地输入不转发 |
+| 点击「恢复控制」 | 恢复正常控制模式 |
+| Ctrl+Alt+V | 快捷键切换模式 |
+| Ctrl+Alt+B | 重新扫描窗口（UU 窗口重建后使用） |
+| 关闭按钮 | 退出程序，自动恢复控制模式 |
 
-## Known caveats
+## 配置
 
-- In view-only mode, UU's own toolbar buttons (screenshot, resolution, etc.) are also disabled, because they are child windows. Press `Ctrl+Alt+V` to come back to control mode before using them.
-- If the UU window is closed and reopened, the cached handle becomes invalid. Press `Ctrl+Alt+B` to rescan.
-- If UU ever ships a built-in view-only mode on Windows, prefer that — this tool is a workaround.
-
-## Configuration
-
-Edit the top of `uu_view_only.py` to target a different process:
+修改 `uu_view_only.py` 顶部的 `TARGET_EXE` 可更改目标进程：
 
 ```python
 TARGET_EXE = "GameViewer.exe"
 ```
+
+## 注意事项
+
+- 仅观看模式下，UU 自身工具栏按钮（截图、分辨率等）也会被禁用，需先恢复控制
+- 如果 UU 窗口关闭后重新打开，点击「重新扫描」按钮即可
+- 程序退出时自动恢复控制模式
+
+## 依赖
+
+- Windows 10 / 11
+- Python 3.10+（仅开发/打包时需要，exe 不需要）
+- `customtkinter` — 现代 GUI 库
 
 ## License
 

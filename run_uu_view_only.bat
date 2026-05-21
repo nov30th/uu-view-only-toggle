@@ -1,6 +1,5 @@
 @echo off
 title UU View-Only Toggle
-
 cd /d "%~dp0"
 
 where python >nul 2>nul
@@ -11,8 +10,6 @@ if errorlevel 1 (
     exit /b 1
 )
 
-python "%~dp0uu_view_only.py"
+pip install customtkinter -q 2>nul
 
-echo.
-echo Script exited. Press any key to close...
-pause >nul
+pythonw "%~dp0uu_view_only.py"
