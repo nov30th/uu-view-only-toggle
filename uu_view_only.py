@@ -31,6 +31,10 @@ user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
 user32.GetWindowTextLengthW.restype = ctypes.c_int
 user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
 user32.GetWindowTextW.restype = ctypes.c_int
+user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+user32.GetClassNameW.restype = ctypes.c_int
+user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+user32.GetWindowRect.restype = wintypes.BOOL
 user32.IsWindowVisible.argtypes = [wintypes.HWND]
 user32.IsWindowVisible.restype = wintypes.BOOL
 user32.IsWindow.argtypes = [wintypes.HWND]
@@ -82,7 +86,39 @@ def get_process_exe(hwnd: int) -> str:
         kernel32.CloseHandle(h)
 
 
+def get_window_title(hwnd: int) -> str:
+    n = user32.GetWindowTextLengthW(hwnd)
+    if n <= 0:
+        return ""
+    buf = ctypes.create_unicode_buffer(n + 1)
+    user32.GetWindowTextW(hwnd, buf, n + 1)
+    return buf.value
+
+
+def get_window_class(hwnd: int) -> str:
+    buf = ctypes.create_unicode_buffer(256)
+    user32.GetClassNameW(hwnd, buf, 256)
+    return buf.value
+
+
+def get_window_size(hwnd: int) -> tuple[int, int]:
+    r = wintypes.RECT()
+    if not user32.GetWindowRect(hwnd, ctypes.byref(r)):
+        return (0, 0)
+    return (r.right - r.left, r.bottom - r.top)
+
+
+def print_window_list(windows: list[int]) -> None:
+    for i, hwnd in enumerate(windows, 1):
+        title = get_window_title(hwnd) or "(no title)"
+        cls = get_window_class(hwnd)
+        w, h = get_window_size(hwnd)
+        print(f"  [{i}] HWND=0x{hwnd:08X}  size={w}x{h}  class={cls}")
+        print(f"      title: {title}")
+
+
 def find_target_windows() -> list[int]:
+    """Visible top-level windows whose owning process exe matches TARGET_EXE."""
     matches: list[int] = []
 
     @EnumWindowsProc
@@ -94,6 +130,9 @@ def find_target_windows() -> list[int]:
         return True
 
     user32.EnumWindows(cb, 0)
+    print(f"[DEBUG] find_target_windows: found {len(matches)} window(s) for {TARGET_EXE}")
+    if matches:
+        print_window_list(matches)
     return matches
 
 
@@ -111,10 +150,22 @@ def collect_descendants(parent: int) -> list[int]:
 
 def apply_mode(selected: list[int], view_only: bool) -> list[int]:
     alive = [h for h in selected if user32.IsWindow(h)]
+    dead = len(selected) - len(alive)
+    if dead:
+        print(f"[WARN] {dead} target window(s) no longer exist. Press Ctrl+Alt+B to rescan.")
     enable = wintypes.BOOL(not view_only)
+    affected = 0
+    mode = "VIEW-ONLY (input blocked)" if view_only else "CONTROL (normal)"
+    print(f"[DEBUG] apply_mode: {mode}")
     for top in alive:
-        for child in collect_descendants(top):
+        title = get_window_title(top) or "(no title)"
+        cls = get_window_class(top)
+        children = collect_descendants(top)
+        print(f"  Top HWND=0x{top:08X} class={cls} title={title}  children={len(children)}")
+        for child in children:
             user32.EnableWindow(child, enable)
+            affected += 1
+    print(f"[OK] Mode: {mode}  | top windows: {len(alive)}  | children affected: {affected}")
     return alive
 
 
@@ -132,11 +183,14 @@ class HotkeyWatcher(threading.Thread):
 
     def run(self):
         hwnd = None
-        try:
-            user32.RegisterHotKey(hwnd, HOTKEY_TOGGLE, MOD_CONTROL | MOD_ALT, VK_V)
-            user32.RegisterHotKey(hwnd, HOTKEY_RESCAN, MOD_CONTROL | MOD_ALT, VK_B)
-        except Exception:
-            pass
+        ok_toggle = user32.RegisterHotKey(hwnd, HOTKEY_TOGGLE, MOD_CONTROL | MOD_ALT, VK_V)
+        ok_rescan = user32.RegisterHotKey(hwnd, HOTKEY_RESCAN, MOD_CONTROL | MOD_ALT, VK_B)
+        if not ok_toggle:
+            print(f"[ERR] Register Ctrl+Alt+V failed (error {ctypes.get_last_error()})")
+        if not ok_rescan:
+            print(f"[WARN] Register Ctrl+Alt+B failed (error {ctypes.get_last_error()})")
+        if ok_toggle and ok_rescan:
+            print("[OK] Hotkeys registered: Ctrl+Alt+V (toggle), Ctrl+Alt+B (rescan)")
 
         msg = wintypes.MSG()
         while not self._quit.is_set():
@@ -241,6 +295,12 @@ class UUViewOnlyApp(ctk.CTk):
         self.selected = windows
         self.status_text.configure(text=f"已找到 {len(windows)} 个窗口")
         self.status_icon.configure(text_color="#4ade80")
+        print(f"[OK] Tracking {len(windows)} window(s):")
+        for hwnd in windows:
+            title = get_window_title(hwnd) or "(no title)"
+            cls = get_window_class(hwnd)
+            w, h = get_window_size(hwnd)
+            print(f"  HWND=0x{hwnd:08X}  size={w}x{h}  class={cls}  title={title}")
 
     def _scan_fail(self):
         self.selected = []
@@ -255,9 +315,11 @@ class UUViewOnlyApp(ctk.CTk):
     # -- Core actions --
     def toggle_mode(self):
         if not self.selected:
+            print("[WARN] No windows selected, cannot toggle")
             self._scan_fail()
             return
         self.view_only = not self.view_only
+        print(f"[INFO] Toggling to view_only={self.view_only}")
         self.selected = apply_mode(self.selected, self.view_only)
         self._set_status(self.view_only)
 
@@ -281,6 +343,7 @@ class UUViewOnlyApp(ctk.CTk):
         self.after(0, self.rescan_windows)
 
     def _initial_scan(self):
+        print("[INFO] Initial scan...")
         windows = find_target_windows()
         if windows:
             self.selected = windows
