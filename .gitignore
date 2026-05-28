@@ -1,11 +1,6 @@
 __pycache__/
 *.pyc
 *.pyo
-.venv/
-.idea/
-.vscode/
 *.log
-*.spec
 build/
-dist/
-icon_cropped.png
+.claude/

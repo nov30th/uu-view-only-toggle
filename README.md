@@ -42,15 +42,9 @@
 
 ## 使用方式
 
-### 方式一：直接运行
-
-双击 `run_uu_view_only.bat`，自动安装依赖并启动 GUI。
-
-### 方式二：打包为单文件 EXE（推荐分发）
-
-1. 双击 `build_exe.bat`
-2. 等待构建完成，在 `dist\` 目录找到 `UU仅观看模式.exe`
-3. 单独分发这个 exe，无需 Python 环境
+1. 下载 `dist/UUViewOnly.exe`
+2. 双击运行，无需安装 Python 或任何依赖
+3. 程序启动后自动扫描 UU 远程窗口
 
 ### 操作
 
@@ -62,14 +56,6 @@
 | Ctrl+Alt+B | 重新扫描窗口（UU 窗口重建后使用） |
 | 关闭按钮 | 退出程序，自动恢复控制模式并移除遮罩 |
 
-## 配置
-
-修改 `uu_view_only.py` 顶部的 `TARGET_EXE` 可更改目标进程：
-
-```python
-TARGET_EXE = "GameViewer.exe"
-```
-
 ## 注意事项
 
 - 仅观看模式下，UU 自身工具栏按钮（截图、分辨率等）也会被禁用，需先恢复控制
@@ -77,11 +63,9 @@ TARGET_EXE = "GameViewer.exe"
 - 程序退出时自动恢复控制模式并销毁所有遮罩窗口
 - 遮罩仅覆盖 UU 窗口区域，不影响其他窗口的正常交互
 
-## 依赖
+## 系统要求
 
 - Windows 10 / 11
-- Python 3.10+（仅开发/打包时需要，exe 不需要）
-- `customtkinter` — 现代 GUI 库
 
 ## License
 
