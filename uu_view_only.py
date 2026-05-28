@@ -48,6 +48,42 @@ user32.RegisterHotKey.restype = wintypes.BOOL
 user32.UnregisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int]
 user32.GetMessageW.argtypes = [ctypes.POINTER(wintypes.MSG), wintypes.HWND, wintypes.UINT, wintypes.UINT]
 user32.PostQuitMessage.argtypes = [ctypes.c_int]
+user32.CreateWindowExW.argtypes = [
+    wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD,
+    ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+    wintypes.HWND, wintypes.HMENU, wintypes.HINSTANCE, wintypes.LPVOID,
+]
+user32.CreateWindowExW.restype = wintypes.HWND
+user32.DestroyWindow.argtypes = [wintypes.HWND]
+user32.DestroyWindow.restype = wintypes.BOOL
+user32.SetWindowPos.argtypes = [
+    wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
+    ctypes.c_int, ctypes.c_int, wintypes.UINT,
+]
+user32.SetWindowPos.restype = wintypes.BOOL
+user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+user32.ShowWindow.restype = wintypes.BOOL
+user32.IsIconic.argtypes = [wintypes.HWND]
+user32.IsIconic.restype = wintypes.BOOL
+user32.SetLayeredWindowAttributes.argtypes = [wintypes.HWND, wintypes.COLORREF, ctypes.c_byte, wintypes.DWORD]
+user32.SetLayeredWindowAttributes.restype = wintypes.BOOL
+user32.UpdateWindow.argtypes = [wintypes.HWND]
+user32.UpdateWindow.restype = wintypes.BOOL
+user32.GetForegroundWindow.argtypes = []
+user32.GetForegroundWindow.restype = wintypes.HWND
+
+WS_EX_LAYERED = 0x00080000
+WS_EX_NOACTIVATE = 0x08000000
+WS_EX_TOPMOST = 0x00000008
+WS_POPUP = 0x80000000
+WS_VISIBLE = 0x10000000
+LWA_ALPHA = 0x00000002
+SW_SHOW = 5
+SW_HIDE = 0
+SWP_NOACTIVATE = 0x0010
+SWP_SHOWWINDOW = 0x0040
+HWND_TOPMOST = -1
+HWND_NOTOPMOST = -2
 
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
@@ -170,6 +206,46 @@ def apply_mode(selected: list[int], view_only: bool) -> list[int]:
 
 
 # ---------------------------------------------------------------------------
+# Invisible overlay window -- physically blocks mouse clicks on UU window
+# ---------------------------------------------------------------------------
+def create_overlay(target_hwnd: int) -> int:
+    """Create a transparent topmost overlay covering *target_hwnd*.
+    The overlay captures all mouse input, preventing clicks from reaching
+    the UU remote window underneath."""
+    overlay_hwnd = user32.CreateWindowExW(
+        WS_EX_LAYERED | WS_EX_NOACTIVATE | WS_EX_TOPMOST,
+        "Static",
+        None,
+        WS_POPUP | WS_VISIBLE,
+        0, 0, 1, 1,
+        None,
+        None,
+        None,
+        None,
+    )
+    if overlay_hwnd:
+        user32.SetLayeredWindowAttributes(overlay_hwnd, 0, 1, LWA_ALPHA)
+    return overlay_hwnd
+
+
+def position_overlay(overlay_hwnd: int, target_hwnd: int) -> None:
+    """Move and resize *overlay_hwnd* to exactly cover *target_hwnd*."""
+    r = wintypes.RECT()
+    if user32.GetWindowRect(target_hwnd, ctypes.byref(r)):
+        w, h = r.right - r.left, r.bottom - r.top
+        user32.SetWindowPos(
+            overlay_hwnd, HWND_TOPMOST,
+            r.left, r.top, w, h,
+            SWP_NOACTIVATE | SWP_SHOWWINDOW,
+        )
+
+
+def destroy_overlay(overlay_hwnd: int) -> None:
+    if overlay_hwnd and user32.IsWindow(overlay_hwnd):
+        user32.DestroyWindow(overlay_hwnd)
+
+
+# ---------------------------------------------------------------------------
 # Hotkey thread (runs Win32 message loop for global hotkeys)
 # ---------------------------------------------------------------------------
 class HotkeyWatcher(threading.Thread):
@@ -228,6 +304,9 @@ class UUViewOnlyApp(ctk.CTk):
         self.view_only = False
         self.selected: list[int] = []
         self.hotkey_watcher = None
+        self.overlays: dict[int, int] = {}  # target_hwnd -> overlay_hwnd
+        self.overlay_last_rects: dict[int, tuple] = {}  # hwnd -> (x, y, w, h)
+        self._overlay_poll_id: str | None = None
 
         # -- Status line: icon + text --
         status_frame = ctk.CTkFrame(self, fg_color="transparent")
@@ -321,7 +400,84 @@ class UUViewOnlyApp(ctk.CTk):
         self.view_only = not self.view_only
         print(f"[INFO] Toggling to view_only={self.view_only}")
         self.selected = apply_mode(self.selected, self.view_only)
+        if self.view_only:
+            self._create_overlays()
+            self._start_overlay_poller()
+        else:
+            self._destroy_all_overlays()
+            self._stop_overlay_poller()
         self._set_status(self.view_only)
+
+    def _create_overlays(self):
+        """Create invisible overlay windows for each tracked UU window."""
+        self._destroy_all_overlays()
+        for hwnd in self.selected:
+            if user32.IsWindow(hwnd):
+                overlay = create_overlay(hwnd)
+                if overlay:
+                    position_overlay(overlay, hwnd)
+                    self.overlays[hwnd] = overlay
+                    # Record initial rect so _update_overlays can diff
+                    r = wintypes.RECT()
+                    if user32.GetWindowRect(hwnd, ctypes.byref(r)):
+                        self.overlay_last_rects[hwnd] = (r.left, r.top, r.right - r.left, r.bottom - r.top)
+                    print(f"[OK] Overlay created for HWND=0x{hwnd:08X} (overlay=0x{overlay:08X})")
+
+    def _destroy_all_overlays(self):
+        for hwnd, overlay in list(self.overlays.items()):
+            destroy_overlay(overlay)
+        self.overlays.clear()
+        self.overlay_last_rects.clear()
+
+    def _start_overlay_poller(self):
+        if self._overlay_poll_id is not None:
+            self.after_cancel(self._overlay_poll_id)
+        self._update_overlays()
+
+    def _stop_overlay_poller(self):
+        if self._overlay_poll_id is not None:
+            self.after_cancel(self._overlay_poll_id)
+            self._overlay_poll_id = None
+
+    def _update_overlays(self):
+        """Re-position overlays only when UU windows actually move or resize."""
+        if not self.view_only:
+            self._overlay_poll_id = None
+            return
+        dead = []
+        for hwnd, overlay in list(self.overlays.items()):
+            if not user32.IsWindow(hwnd):
+                dead.append(hwnd)
+                destroy_overlay(overlay)
+                continue
+            if user32.IsIconic(hwnd):
+                user32.ShowWindow(overlay, SW_HIDE)
+                continue
+
+            new_rect = wintypes.RECT()
+            if not user32.GetWindowRect(hwnd, ctypes.byref(new_rect)):
+                user32.ShowWindow(overlay, SW_HIDE)
+                continue
+
+            new_size = (new_rect.left, new_rect.top, new_rect.right - new_rect.left, new_rect.bottom - new_rect.top)
+            old_size = self.overlay_last_rects.get(hwnd)
+            if old_size != new_size:
+                self.overlay_last_rects[hwnd] = new_size
+                user32.SetWindowPos(
+                    overlay, HWND_TOPMOST,
+                    *new_size,
+                    SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                )
+            user32.ShowWindow(overlay, SW_SHOW)
+
+        for hwnd in dead:
+            del self.overlays[hwnd]
+            self.overlay_last_rects.pop(hwnd, None)
+
+        if self.view_only:
+            self._overlay_poll_id = self.after(1000, self._update_overlays)
+        else:
+            self._overlay_poll_id = None
 
     def _on_hotkey_toggle(self):
         self.after(0, self.toggle_mode)
@@ -329,6 +485,8 @@ class UUViewOnlyApp(ctk.CTk):
     def rescan_windows(self):
         if self.view_only:
             apply_mode(self.selected, False)
+            self._destroy_all_overlays()
+            self._stop_overlay_poller()
             self.view_only = False
             self._set_status(False)
 
@@ -361,6 +519,8 @@ class UUViewOnlyApp(ctk.CTk):
     def _on_close(self):
         if self.view_only:
             apply_mode(self.selected, False)
+            self._destroy_all_overlays()
+            self._stop_overlay_poller()
         if self.hotkey_watcher:
             self.hotkey_watcher.stop()
         self.destroy()
