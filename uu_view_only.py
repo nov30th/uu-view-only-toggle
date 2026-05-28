@@ -71,6 +71,11 @@ user32.UpdateWindow.argtypes = [wintypes.HWND]
 user32.UpdateWindow.restype = wintypes.BOOL
 user32.GetForegroundWindow.argtypes = []
 user32.GetForegroundWindow.restype = wintypes.HWND
+user32.GetWindow.argtypes = [wintypes.HWND, wintypes.UINT]
+user32.GetWindow.restype = wintypes.HWND
+user32.IsWindowVisible.argtypes = [wintypes.HWND]
+
+GW_HWNDNEXT = 2
 
 WS_EX_LAYERED = 0x00080000
 WS_EX_NOACTIVATE = 0x08000000
@@ -209,11 +214,10 @@ def apply_mode(selected: list[int], view_only: bool) -> list[int]:
 # Invisible overlay window -- physically blocks mouse clicks on UU window
 # ---------------------------------------------------------------------------
 def create_overlay(target_hwnd: int) -> int:
-    """Create a transparent topmost overlay covering *target_hwnd*.
-    The overlay captures all mouse input, preventing clicks from reaching
-    the UU remote window underneath."""
+    """Create a transparent (alpha=1) overlay covering *target_hwnd*.
+    No WS_EX_TOPMOST — Z-order is set dynamically to stay just above target."""
     overlay_hwnd = user32.CreateWindowExW(
-        WS_EX_LAYERED | WS_EX_NOACTIVATE | WS_EX_TOPMOST,
+        WS_EX_LAYERED | WS_EX_NOACTIVATE,
         "Static",
         None,
         WS_POPUP | WS_VISIBLE,
@@ -228,13 +232,27 @@ def create_overlay(target_hwnd: int) -> int:
     return overlay_hwnd
 
 
+def get_zorder_insert_after(target_hwnd: int) -> int:
+    """Find the visible window immediately above *target_hwnd* in Z-order.
+    Returns HWND_TOP if none found, so overlay ends up just above target."""
+    hwnd = target_hwnd
+    while True:
+        hwnd = user32.GetWindow(hwnd, GW_HWNDNEXT)
+        if not hwnd:
+            return HWND_TOP
+        if user32.IsWindowVisible(hwnd):
+            return hwnd
+
+
 def position_overlay(overlay_hwnd: int, target_hwnd: int) -> None:
-    """Move and resize *overlay_hwnd* to exactly cover *target_hwnd*."""
+    """Move and resize *overlay_hwnd* to cover *target_hwnd*,
+    placing it in Z-order just above the target window."""
     r = wintypes.RECT()
     if user32.GetWindowRect(target_hwnd, ctypes.byref(r)):
         w, h = r.right - r.left, r.bottom - r.top
+        insert_after = get_zorder_insert_after(target_hwnd)
         user32.SetWindowPos(
-            overlay_hwnd, HWND_TOPMOST,
+            overlay_hwnd, insert_after,
             r.left, r.top, w, h,
             SWP_NOACTIVATE | SWP_SHOWWINDOW,
         )
@@ -305,7 +323,7 @@ class UUViewOnlyApp(ctk.CTk):
         self.selected: list[int] = []
         self.hotkey_watcher = None
         self.overlays: dict[int, int] = {}  # target_hwnd -> overlay_hwnd
-        self.overlay_last_rects: dict[int, tuple] = {}  # hwnd -> (x, y, w, h)
+        self.overlay_last_state: dict[int, tuple] = {}  # hwnd -> (x, y, w, h, insert_after)
         self._overlay_poll_id: str | None = None
 
         # -- Status line: icon + text --
@@ -417,17 +435,19 @@ class UUViewOnlyApp(ctk.CTk):
                 if overlay:
                     position_overlay(overlay, hwnd)
                     self.overlays[hwnd] = overlay
-                    # Record initial rect so _update_overlays can diff
                     r = wintypes.RECT()
                     if user32.GetWindowRect(hwnd, ctypes.byref(r)):
-                        self.overlay_last_rects[hwnd] = (r.left, r.top, r.right - r.left, r.bottom - r.top)
+                        insert_after = get_zorder_insert_after(hwnd)
+                        self.overlay_last_state[hwnd] = (
+                            r.left, r.top, r.right - r.left, r.bottom - r.top, insert_after,
+                        )
                     print(f"[OK] Overlay created for HWND=0x{hwnd:08X} (overlay=0x{overlay:08X})")
 
     def _destroy_all_overlays(self):
         for hwnd, overlay in list(self.overlays.items()):
             destroy_overlay(overlay)
         self.overlays.clear()
-        self.overlay_last_rects.clear()
+        self.overlay_last_state.clear()
 
     def _start_overlay_poller(self):
         if self._overlay_poll_id is not None:
@@ -440,7 +460,7 @@ class UUViewOnlyApp(ctk.CTk):
             self._overlay_poll_id = None
 
     def _update_overlays(self):
-        """Re-position overlays only when UU windows actually move or resize."""
+        """Re-position overlays only when UU window rect or Z-order changes."""
         if not self.view_only:
             self._overlay_poll_id = None
             return
@@ -454,25 +474,26 @@ class UUViewOnlyApp(ctk.CTk):
                 user32.ShowWindow(overlay, SW_HIDE)
                 continue
 
-            new_rect = wintypes.RECT()
-            if not user32.GetWindowRect(hwnd, ctypes.byref(new_rect)):
+            r = wintypes.RECT()
+            if not user32.GetWindowRect(hwnd, ctypes.byref(r)):
                 user32.ShowWindow(overlay, SW_HIDE)
                 continue
 
-            new_size = (new_rect.left, new_rect.top, new_rect.right - new_rect.left, new_rect.bottom - new_rect.top)
-            old_size = self.overlay_last_rects.get(hwnd)
-            if old_size != new_size:
-                self.overlay_last_rects[hwnd] = new_size
+            insert_after = get_zorder_insert_after(hwnd)
+            new_state = (r.left, r.top, r.right - r.left, r.bottom - r.top, insert_after)
+            old_state = self.overlay_last_state.get(hwnd)
+            if old_state != new_state:
+                self.overlay_last_state[hwnd] = new_state
                 user32.SetWindowPos(
-                    overlay, HWND_TOPMOST,
-                    *new_size,
+                    overlay, insert_after,
+                    new_state[0], new_state[1], new_state[2], new_state[3],
                     SWP_NOACTIVATE | SWP_SHOWWINDOW,
                 )
             user32.ShowWindow(overlay, SW_SHOW)
 
         for hwnd in dead:
             del self.overlays[hwnd]
-            self.overlay_last_rects.pop(hwnd, None)
+            self.overlay_last_state.pop(hwnd, None)
 
         if self.view_only:
             self._overlay_poll_id = self.after(1000, self._update_overlays)
